@@ -1,0 +1,14 @@
+*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/outputs/
+/outputs/*
+!/outputs/edge-gym-booker/
+/outputs/edge-gym-booker/*
+!/outputs/edge-gym-booker/*.mjs
+!/outputs/edge-gym-booker/package.json
+!/outputs/edge-gym-booker/package-lock.json
+!/outputs/edge-gym-booker/config.example.json
+!/outputs/edge-gym-booker/install-schedule.ps1
+!/outputs/edge-gym-booker/README.md

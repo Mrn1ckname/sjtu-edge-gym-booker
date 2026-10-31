@@ -1,0 +1,23 @@
+{
+  "bookingUrl": "https://sports.sjtu.edu.cn/pc/#/apointmentDetails/1/d784ad7c-cb24-4282-afd6-a67aec68c675/%25E5%2585%25A8%25E9%2583%25A8/0",
+  "activityType": "健身房",
+  "sundayBooking": {
+    "bookingUrl": "https://sports.sjtu.edu.cn/pc/#/apointmentDetails/1/3b10ff47-7e83-4c21-816c-5edc257168c1/%25E5%2585%25A8%25E9%2583%25A8/0",
+    "activityType": "羽毛球",
+    "preferredCourts": [],
+    "excludedCourts": []
+  },
+  "targetDate": "auto",
+  "timeSlots": [
+    "17:00-18:00"
+  ],
+  "preferredCourts": [],
+  "excludedCourts": [],
+  "sameCourt": true,
+  "releaseAt": "auto",
+  "retryIntervalMs": 1500,
+  "maxAttempts": 120,
+  "dryRun": false,
+  "paymentTimeoutMs": 90000,
+  "keepOpenMinutes": 60
+}
