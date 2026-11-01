@@ -4,7 +4,7 @@
   "sundayBooking": {
     "bookingUrl": "https://sports.sjtu.edu.cn/pc/#/apointmentDetails/1/3b10ff47-7e83-4c21-816c-5edc257168c1/%25E5%2585%25A8%25E9%2583%25A8/0",
     "activityType": "羽毛球",
-    "preferredCourts": [],
+    "preferredCourts": ["场地10", "场地9", "场地8", "场地7", "场地6", "场地5"],
     "excludedCourts": []
   },
   "targetDate": "auto",
