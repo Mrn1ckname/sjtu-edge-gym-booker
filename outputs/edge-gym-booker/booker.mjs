@@ -710,6 +710,7 @@ async function attemptBooking(page, config) {
       await recoverAuthentication(page, config);
     }
   }
+  await dismissBookingNotice(page);
   await tracker.idle();
   if (!(await page.locator('.lists .el-tabs__item').count())) {
     diagnostics?.record('empty-venue-recovery', {});
@@ -771,7 +772,49 @@ function hasCaptcha(bodyText) {
   return /(请完成安全验证|向右滑动完成验证|拖动滑块完成拼图)/.test(bodyText);
 }
 
-async function waitForPaymentInterface(context, originalPage, timeoutMs) {
+async function dismissBookingNotice(page) {
+  const notice = page.locator('.el-dialog:visible').filter({ hasText: '本人已认真阅读' });
+  if (!(await notice.count())) return;
+  await notice.getByRole('button', { name: '上一步', exact: true }).click({ timeout: 3000 });
+  await notice.waitFor({ state: 'hidden', timeout: 3000 });
+  diagnostics?.record('booking-notice-dismissed', { reason: 'before-retry' });
+}
+
+// 仅关联监听器安装后由本页面发出的下单请求，不接收上一轮迟到的响应。
+function observeOrderSubmission(page) {
+  const requests = new Set();
+  let result = null, closed = false;
+  const onRequest = request => {
+    const url = new URL(request.url());
+    if (url.origin === 'https://sports.sjtu.edu.cn' && url.pathname === '/venue/personal/ConfirmOrder' && request.method() === 'POST') requests.add(request);
+  };
+  const onResponse = async response => {
+    if (!requests.has(response.request())) return;
+    try {
+      const body = await response.json();
+      if (closed) return;
+      const code = body?.code;
+      const message = String(body?.msg ?? body?.message ?? '').slice(0, 500);
+      if (!response.ok() || (code != null && String(code) !== '0')) {
+        result = { outcome: 'submit-error', page, message: message || `下单接口返回 HTTP ${response.status()}，业务码 ${code}` };
+      } else if (String(code) === '0') {
+        result = { outcome: 'order-confirmed', page };
+      }
+      diagnostics?.record('order-api-result', { httpStatus: response.status(), code, message, outcome: result?.outcome ?? 'submission-unknown' });
+    } catch (error) {
+      if (!closed) diagnostics?.record('order-api-unreadable', { message: error.message });
+    }
+  };
+  page.on('request', onRequest);
+  page.on('response', onResponse);
+  return { get result() { return result; }, close() {
+    closed = true;
+    page.off('request', onRequest);
+    page.off('response', onResponse);
+  } };
+}
+
+async function waitForPaymentInterface(context, originalPage, timeoutMs, submission) {
   const deadline = Date.now() + timeoutMs;
   let payActionClicked = false;
   let orderPage = originalPage;
@@ -789,6 +832,8 @@ async function waitForPaymentInterface(context, originalPage, timeoutMs) {
         return { outcome: "payment-ready", page: candidate };
       }
 
+      if (submission?.result?.outcome === 'submit-error') return submission.result;
+
       const paymentAction = await visiblePaymentAction(candidate);
       if (paymentAction && !payActionClicked) {
         payActionClicked = true;
@@ -803,14 +848,14 @@ async function waitForPaymentInterface(context, originalPage, timeoutMs) {
         orderPage = candidate;
       }
 
-      const knownError = ["您有尚未支付的订单", "预约失败", "场地已满", "下单失败"].find((text) => body.includes(text));
+      const knownError = ["您有尚未支付的订单", "预约失败", "场地已满", "场地预定人数已满", "已被预定", "场地信息已过期", "下单失败"].find((text) => body.includes(text));
       if (knownError) return { outcome: "submit-error", page: candidate, message: knownError };
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
   return {
-    outcome: payActionClicked ? "payment-timeout" : "order-created",
+    outcome: payActionClicked || submission?.result?.outcome === 'order-confirmed' ? "payment-timeout" : "submission-unknown",
     page: orderPage
   };
 }
@@ -838,7 +883,7 @@ async function submitOrder(context, page, config, picks, scheduled = false) {
   await dialog.waitFor({ state: "visible", timeout: 10_000 });
   const checkboxLabel = dialog.locator("label.el-checkbox");
   const checkbox = dialog.locator('input[type="checkbox"]');
-  await checkboxLabel.click();
+  if (!(await checkbox.isChecked())) await checkboxLabel.click();
   if (!(await checkbox.isChecked())) throw new RetryableBookingError("预订须知未能成功勾选，将重试。 ");
   const submit = dialog.getByRole("button", { name: /提交订单/ });
   if (!(await submit.isEnabled())) throw new RetryableBookingError("“提交订单”按钮仍不可用，将重试。 ");
@@ -850,9 +895,17 @@ async function submitOrder(context, page, config, picks, scheduled = false) {
   await diagnostics?.snapshot(page, "before-submit");
   enforceScheduledWindow(config, scheduled);
   await assertBookingDate(page, config.targetDate);
+  if (!(await checkbox.isChecked())) throw new RetryableBookingError('提交前须知勾选状态发生变化，将重试。');
   diagnostics?.record("submit-click", { targetDate: config.targetDate, activity: config.activityType, picks });
-  await submit.click({ timeout: 10_000, noWaitAfter: true });
-  const result = await waitForPaymentInterface(context, page, config.paymentTimeoutMs);
+  const submission = observeOrderSubmission(page);
+  let result;
+  try {
+    await submit.click({ timeout: 10_000, noWaitAfter: true });
+    const remainingMs = scheduled ? new Date(resolveReleaseAt(config)).getTime() + 5 * 60_000 - Date.now() : config.paymentTimeoutMs;
+    result = await waitForPaymentInterface(context, page, Math.max(0, Math.min(config.paymentTimeoutMs, remainingMs)), submission);
+  } finally {
+    submission.close();
+  }
   diagnostics?.record("submit-result", { outcome: result.outcome, message: result.message });
   await diagnostics?.snapshot(result.page || page, "after-submit");
 
@@ -867,7 +920,7 @@ async function submitOrder(context, page, config, picks, scheduled = false) {
   if (result.outcome === "submit-error") {
     throw new RetryableBookingError(`网站返回：${result.message}，将重新加载并重试提交。`);
   }
-  if (result.outcome === "order-created") {
+  if (result.outcome === "submission-unknown") {
     throw new RetryableBookingError("尚未确认支付入口，将重新加载并重试提交。 ");
   }
   throw new RetryableBookingError("等待支付界面超时，将重新加载并重试。 ");
@@ -1105,7 +1158,7 @@ export {
   assertAuthenticated, chooseSlots, clickActivityType, clickDate, ensureLoggedIn,
   installAuthenticationGuard, isRetryableBeforeSubmission,
   launchEdge, openAuthenticatedBookingPage, readConfig, readGrid, recoverAuthentication,
-  restoreAuthentication, scheduledSkipReason, submitOrder, waitForPaymentInterface
+  restoreAuthentication, scheduledSkipReason, submitOrder, waitForPaymentInterface, dismissBookingNotice, observeOrderSubmission
 };
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -1130,3 +1183,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     await bookingMode({ scheduled: args.has("--scheduled") });
   }
 }
+
