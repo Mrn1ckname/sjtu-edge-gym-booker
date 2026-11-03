@@ -9,6 +9,8 @@
     "check": "node booker.mjs --check-config",
     "show-time": "node booker.mjs --show-release",
     "test": "node booker.mjs --self-test",
+    "test:submission": "node --test submission-response.test.mjs",
+    "test:submission-browser": "node submission-regression.mjs",
     "orders": "node booker.mjs --inspect-orders",
     "book": "node booker.mjs"
   },
