@@ -148,7 +148,7 @@ function retryDelayMs(config, now = new Date()) {
 
 function isLoadingFailure(error) {
   return isRetryableBeforeSubmission(error) &&
-    !/暂无可选场地|没有找到同时满足/.test(error.message);
+    !/暂无可选场地|没有找到同时满足|等待下一轮更新日期列表/.test(error.message);
 }
 
 function log(message) {
@@ -729,6 +729,11 @@ async function attemptBooking(page, config) {
     // 午间新日期尚未进入列表时，重新点击项目以更新列表，无需整页刷新。
     await clickActivityType(page, config.activityType);
     await tracker.idle();
+    // 日期列表请求已完成仍没有目标日期时，等待不存在的按钮不会产生新数据。
+    if (config.activityType === '羽毛球' && !(await target.count())) {
+      diagnostics?.record('badminton-date-not-released', { targetDate: config.targetDate });
+      throw new GridNotReadyError(`日期 ${config.targetDate} 尚未开放，等待下一轮更新日期列表`);
+    }
   }
   const active = await target.count() && (((await target.getAttribute('class')) || '').includes('is-active') || await target.getAttribute('aria-selected') === 'true');
   if (active) {
@@ -864,7 +869,7 @@ async function submitOrder(context, page, config, picks, scheduled = false) {
   await assertAuthenticated(page);
   enforceScheduledWindow(config, scheduled);
   await assertBookingDate(page, config.targetDate);
-  await diagnostics?.snapshot(page, "before-order");
+  await diagnostics?.snapshot(page, "before-order", { captureImage: config.activityType !== '羽毛球' });
   if (config.dryRun) {
     log("演练模式：已选中目标场地，但不会点击“立即下单”。把 config.json 的 dryRun 改为 false 才会真实提交。 ");
     return { outcome: "dry-run", page };
@@ -892,7 +897,7 @@ async function submitOrder(context, page, config, picks, scheduled = false) {
   await assertAuthenticated(page);
   enforceScheduledWindow(config, scheduled);
   await assertBookingDate(page, config.targetDate);
-  await diagnostics?.snapshot(page, "before-submit");
+  await diagnostics?.snapshot(page, "before-submit", { captureImage: config.activityType !== '羽毛球' });
   enforceScheduledWindow(config, scheduled);
   await assertBookingDate(page, config.targetDate);
   if (!(await checkbox.isChecked())) throw new RetryableBookingError('提交前须知勾选状态发生变化，将重试。');
@@ -983,6 +988,16 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
     try {
       await openAuthenticatedBookingPage(page, config);
       await waitForGrid(page);
+      if (config.activityType === '羽毛球') {
+        const tracker = gridTracker(page, (event, data) => diagnostics?.record(event, data));
+        await tracker.idle();
+        const active = await page.locator('.el-tabs__item.is-active').allTextContents();
+        if (!active.some(text => text.trim() === config.activityType)) {
+          await clickActivityType(page, config.activityType);
+          await tracker.idle();
+        }
+        diagnostics?.record('badminton-preload-ready', { activity: config.activityType });
+      }
       await saveAuthentication(context, page);
     } catch (error) {
       if (!isRetryableBeforeSubmission(error)) throw error;

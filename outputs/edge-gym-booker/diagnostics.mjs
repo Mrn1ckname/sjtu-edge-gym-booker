@@ -45,7 +45,7 @@ export function createDiagnostics(file) {
     context.pages().forEach(attachPage);
     context.on('page', attachPage);
   }
-  async function snapshot(page, phase) {
+  async function snapshot(page, phase, { captureImage = true } = {}) {
     try {
       const state = await page.evaluate(timeSlots => ({
         activeTabs: [...document.querySelectorAll('[role="tab"][aria-selected="true"], .el-tabs__item.is-active')].map(el => ({ id: el.id, text: el.innerText })),
@@ -66,14 +66,14 @@ export function createDiagnostics(file) {
       }), target?.timeSlots || []);
       const key = JSON.stringify({ tabs: state.activeTabs, cells: state.targetCells, loading: state.loading });
       let screenshot = null;
-      if (key !== previousScreenshot || Date.now() - screenshotAt > 30000 || /submit|order/.test(phase)) {
+      if (captureImage && (key !== previousScreenshot || Date.now() - screenshotAt > 30000 || /submit|order/.test(phase))) {
         screenshot = path.join(path.dirname(file), `${path.basename(file, '.jsonl')}-${++sequence}-${phase}.png`);
         const grid = page.locator('.inner-seat-wrapper');
         if (await grid.isVisible()) await grid.screenshot({ path: screenshot, timeout: 3000 });
         else await page.screenshot({ path: screenshot, fullPage: false, timeout: 3000 });
         previousScreenshot = key; screenshotAt = Date.now();
       }
-      record('snapshot', { phase, url: safeUrl(page.url()), ...state, text: clean(state.text), screenshot });
+      record('snapshot', { phase, url: safeUrl(page.url()), ...state, text: clean(state.text), screenshot, captureImage });
     } catch (error) { record('snapshot-error', { phase, error: clean(error.message) }); }
   }
   return { record, attach, snapshot, setTarget(config) { target = config; } };
