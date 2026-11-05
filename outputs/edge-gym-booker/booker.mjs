@@ -118,8 +118,8 @@ function scheduledSkipReason(config, now = new Date()) {
     return "定时运行要求 targetDate 和 releaseAt 均为 auto";
   }
   const release = new Date(resolveReleaseAt(config)).getTime();
-  if (now.getTime() < release - 10_000) return "尚未到 11:59:50 的定时启动窗口";
-  if (now.getTime() >= release + 5 * 60_000) return "已超过 12:05 的预约截止时间，跳过本次预约";
+  if (now.getTime() < release - (30 * 60_000 + 10_000)) return "尚未到 11:29:50 的定时启动窗口";
+  if (now.getTime() >= release + 3 * 60_000) return "已超过 12:03 的预约截止时间，跳过本次预约";
   return null;
 }
 
@@ -142,13 +142,16 @@ function isAfterChinaNoon(now = new Date()) {
   return chinaHour >= 12;
 }
 
-function retryDelayMs(config, now = new Date()) {
-  return isAfterChinaNoon(now) ? 2000 : config.retryIntervalMs;
+function retryDelayMs(config, now = new Date(), error = null, failures = 0) {
+  if (!isAfterChinaNoon(now)) return config.retryIntervalMs;
+  if (/429|频繁|限流/.test(error?.message || '')) return 5000;
+  if (error && isLoadingFailure(error)) return Math.min(3000, 500 * 2 ** Math.min(failures, 3));
+  return 300;
 }
 
 function isLoadingFailure(error) {
   return isRetryableBeforeSubmission(error) &&
-    !/暂无可选场地|没有找到同时满足|等待下一轮更新日期列表/.test(error.message);
+    !/暂无可选场地|没有找到同时满足|等待下一轮更新日期列表|网站返回：/.test(error.message);
 }
 
 function log(message) {
@@ -732,25 +735,14 @@ async function attemptBooking(page, config) {
     await clickActivityType(page, config.activityType);
     await tracker.idle();
     // 日期列表请求已完成仍没有目标日期时，等待不存在的按钮不会产生新数据。
-    if (config.activityType === '羽毛球' && !(await target.count())) {
-      diagnostics?.record('badminton-date-not-released', { targetDate: config.targetDate });
+    if (!(await target.count())) {
+      diagnostics?.record('date-not-released', { targetDate: config.targetDate });
       throw new GridNotReadyError(`日期 ${config.targetDate} 尚未开放，等待下一轮更新日期列表`);
     }
   }
-  const active = await target.count() && (((await target.getAttribute('class')) || '').includes('is-active') || await target.getAttribute('aria-selected') === 'true');
-  if (active) {
-    const alternative = page.locator('[id^="tab-20"]').filter({ visible: true });
-    let otherDate = null;
-    for (let index = 0; index < await alternative.count(); index++) {
-      const id = await alternative.nth(index).getAttribute('id');
-      if (id !== `tab-${config.targetDate}` && /^tab-\d{4}-\d{2}-\d{2}$/.test(id)) { otherDate = id.slice(4); break; }
-    }
-    if (!otherDate) throw new GridNotReadyError('没有可切换的日期，暂不读取旧网格');
-    await clickDate(page, otherDate);
-    await tracker.idle();
-  }
+  // 网站的 tab-click 即使点击当前日期也会重新查询，省去查询其他日期的往返。
   const before = tracker.sequence;
-  diagnostics?.record('date-refresh', { targetDate: config.targetDate, mode: 'date-tabs', afterRequestId: before });
+  diagnostics?.record('date-refresh', { targetDate: config.targetDate, mode: 'target-date-click', afterRequestId: before });
   await clickDate(page, config.targetDate);
   await assertAuthenticated(page);
   await tracker.ready(config, before);
@@ -858,7 +850,7 @@ async function waitForPaymentInterface(context, originalPage, timeoutMs, submiss
       const knownError = ["您有尚未支付的订单", "预约失败", "场地已满", "场地预定人数已满", "已被预定", "场地信息已过期", "下单失败"].find((text) => body.includes(text));
       if (knownError) return { outcome: "submit-error", page: candidate, message: knownError };
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
   return {
@@ -871,7 +863,7 @@ async function submitOrder(context, page, config, picks, scheduled = false) {
   await assertAuthenticated(page);
   enforceScheduledWindow(config, scheduled);
   await assertBookingDate(page, config.targetDate);
-  await diagnostics?.snapshot(page, "before-order", { captureImage: config.activityType !== '羽毛球' });
+  await diagnostics?.snapshot(page, "before-order", { captureImage: false });
   if (config.dryRun) {
     log("演练模式：已选中目标场地，但不会点击“立即下单”。把 config.json 的 dryRun 改为 false 才会真实提交。 ");
     return { outcome: "dry-run", page };
@@ -899,22 +891,22 @@ async function submitOrder(context, page, config, picks, scheduled = false) {
   await assertAuthenticated(page);
   enforceScheduledWindow(config, scheduled);
   await assertBookingDate(page, config.targetDate);
-  await diagnostics?.snapshot(page, "before-submit", { captureImage: config.activityType !== '羽毛球' });
+  await diagnostics?.snapshot(page, "before-submit", { captureImage: false });
   enforceScheduledWindow(config, scheduled);
   await assertBookingDate(page, config.targetDate);
   if (!(await checkbox.isChecked())) throw new RetryableBookingError('提交前须知勾选状态发生变化，将重试。');
-  diagnostics?.record("submit-click", { targetDate: config.targetDate, activity: config.activityType, picks });
+  diagnostics?.record("submit-click", { targetDate: config.targetDate, activity: config.activityType, picks, sinceReleaseMs: Date.now() - new Date(resolveReleaseAt(config)).getTime() });
   const submission = observeOrderSubmission(page);
   let result;
   try {
     await submit.click({ timeout: 10_000, noWaitAfter: true });
-    const remainingMs = scheduled ? new Date(resolveReleaseAt(config)).getTime() + 5 * 60_000 - Date.now() : config.paymentTimeoutMs;
+    const remainingMs = scheduled ? new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000 - Date.now() : config.paymentTimeoutMs;
     result = await waitForPaymentInterface(context, page, Math.max(0, Math.min(config.paymentTimeoutMs, remainingMs)), submission);
   } finally {
     submission.close();
   }
   diagnostics?.record("submit-result", { outcome: result.outcome, message: result.message });
-  await diagnostics?.snapshot(result.page || page, "after-submit");
+  await diagnostics?.snapshot(result.page || page, "after-submit", { captureImage: result.outcome === "payment-ready" || result.outcome === "captcha" });
 
   if (result.outcome === "payment-ready") {
     log(`已到达支付界面并停止，未执行支付：${result.page.url()}`);
@@ -941,9 +933,12 @@ async function capture(page, label) {
   return file;
 }
 
-async function holdOpen(context, minutes) {
-  const ms = Math.max(1, Number(minutes) || 60) * 60_000;
-  log(`Edge 将保持打开 ${Math.round(ms / 60_000)} 分钟；检查完成后也可直接关闭窗口或按 Ctrl+C。`);
+async function holdOpen(context, minutes, cutoff = null) {
+  const configuredMs = Math.max(1, Number(minutes) || 60) * 60_000;
+  const ms = cutoff === null ? configuredMs : Math.max(0, Math.min(configuredMs, cutoff - Date.now()));
+  log(cutoff === null
+    ? `Edge 将保持打开 ${Math.round(ms / 60_000)} 分钟；检查完成后也可直接关闭窗口或按 Ctrl+C。`
+    : `Edge 最迟保留至12:03（剩余 ${Math.ceil(ms / 1000)} 秒）；需要支付请在关闭前完成。`);
   await new Promise((resolve) => setTimeout(resolve, ms));
   await context.close();
 }
@@ -975,6 +970,16 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
   context.setDefaultNavigationTimeout(15_000);
   context.setDefaultTimeout(10_000);
   let page = await getPage(context);
+  let deadlineTimer = null;
+  if (scheduled) {
+    const cutoff = new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000;
+    deadlineTimer = setTimeout(() => {
+      log('到达12:03，关闭预约专用浏览器并结束本次脚本。');
+      diagnostics.record('run-cutoff', { reason: 'absolute-deadline' });
+      setTimeout(() => process.exit(0), 1500).unref();
+      void context.close().finally(() => process.exit(0));
+    }, Math.max(0, cutoff - Date.now()));
+  }
   let closing = false;
   process.on("SIGINT", async () => {
     if (closing) return;
@@ -990,7 +995,7 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
     try {
       await openAuthenticatedBookingPage(page, config);
       await waitForGrid(page);
-      if (config.activityType === '羽毛球') {
+      if (config.activityType) {
         const tracker = gridTracker(page, (event, data) => diagnostics?.record(event, data));
         await tracker.idle();
         const active = await page.locator('.el-tabs__item.is-active').allTextContents();
@@ -998,7 +1003,7 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
           await clickActivityType(page, config.activityType);
           await tracker.idle();
         }
-        diagnostics?.record('badminton-preload-ready', { activity: config.activityType });
+        diagnostics?.record('preload-ready', { activity: config.activityType });
       }
       await saveAuthentication(context, page);
     } catch (error) {
@@ -1008,6 +1013,19 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
     const releaseAt = resolveReleaseAt(config);
     if (config.releaseAt === "auto") {
       log(`自动计算开抢时间：${new Date(releaseAt).toLocaleString("zh-CN", { hour12: false })}（目标日期前 7 天中午 12:00）`);
+    }
+    if (scheduled && Date.now() < new Date(releaseAt).getTime() - 30_000) {
+      await waitUntilRelease(new Date(new Date(releaseAt).getTime() - 30_000).toISOString());
+      log('开抢前再次验证登录和预加载项目……');
+      try {
+        await openAuthenticatedBookingPage(page, config);
+        await clickActivityType(page, config.activityType);
+        await gridTracker(page).idle();
+        await saveAuthentication(context, page);
+      } catch (error) {
+        if (!isRetryableBeforeSubmission(error)) throw error;
+        log(`开抢前预检暂未完成：${error.message}`);
+      }
     }
     await waitUntilRelease(releaseAt);
 
@@ -1027,14 +1045,13 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
           }
         }
         if (result) break;
-        log(`第 ${attempt}${scheduled ? "（12:05 截止）" : `/${config.maxAttempts}`} 次切换日期更新并检查预约网格……`);
+        log(`第 ${attempt}${scheduled ? "（12:03 截止）" : `/${config.maxAttempts}`} 次更新目标日期并检查预约网格……`);
         picks = await attemptBooking(page, config);
-        await saveAuthentication(context, page);
         result = await submitOrder(context, page, config, picks, scheduled);
         break;
       } catch (error) {
         diagnostics.record('attempt-error', { attempt, name: error.name, message: error.message, stack: error.stack });
-        await diagnostics.snapshot(page, `attempt-${attempt}-error`);
+        await diagnostics.snapshot(page, `attempt-${attempt}-error`, { captureImage: false });
         if (!isRetryableBeforeSubmission(error)) throw error;
         const restartEnabled = isAfterChinaNoon();
         consecutiveLoadingFailures = restartEnabled && isLoadingFailure(error) ? consecutiveLoadingFailures + 1 : 0;
@@ -1052,7 +1069,7 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
           page = await getPage(context);
           consecutiveLoadingFailures = 0;
         }
-        const delayMs = retryDelayMs(config);
+        const delayMs = retryDelayMs(config, new Date(), error, consecutiveLoadingFailures);
         log(`${error.message}。${scheduled || attempt < config.maxAttempts ? `${delayMs / 1000} 秒后更新场地数据重试。` : "已达到最大重试次数。"}`);
         if (scheduled || attempt < config.maxAttempts) {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -1064,12 +1081,12 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
     process.stdout.write("\u0007\u0007\u0007");
     const screenshot = await capture(result.page || page, result.outcome);
     log(`页面截图：${screenshot}`);
-    await holdOpen(context, config.keepOpenMinutes);
+    await holdOpen(context, config.keepOpenMinutes, scheduled ? new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000 : null);
   } catch (error) {
     if (error instanceof ScheduledWindowClosedError) {
       log(`停止尝试：${error.message}。提交记录见本次日志。`);
       diagnostics.record('run-cutoff', { message: error.message });
-      await holdOpen(context, config.keepOpenMinutes);
+      await holdOpen(context, config.keepOpenMinutes, scheduled ? new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000 : null);
       return;
     }
     process.stdout.write("\u0007\u0007\u0007");
@@ -1077,9 +1094,11 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
     console.error(`\n错误：${error.message}`);
     console.error(`页面截图：${screenshot}`);
     diagnostics.record('run-error', { message: error.message, stack: error.stack });
-    console.error(`Edge 会保留 ${config.keepOpenMinutes} 分钟，便于你查看页面提示。`);
-    await holdOpen(context, config.keepOpenMinutes);
+    console.error(scheduled ? "Edge 最迟保留至12:03。" : `Edge 会保留 ${config.keepOpenMinutes} 分钟，便于你查看页面提示。`);
+    await holdOpen(context, config.keepOpenMinutes, scheduled ? new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000 : null);
     process.exitCode = 1;
+  } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
   }
 }
 
@@ -1131,15 +1150,20 @@ function selfTest() {
   assert.equal(isLoadingFailure(new RetryableBookingError("时段 17:00-18:00 暂无可选场地")), false);
   assert.equal(isLoadingFailure(new AuthenticationExpiredError("请重新登录")), false);
   assert.equal(retryDelayMs({ retryIntervalMs: 1500 }, new Date("2026-10-23T11:59:59+08:00")), 1500);
-  assert.equal(retryDelayMs({ retryIntervalMs: 1500 }, new Date("2026-10-23T12:00:00+08:00")), 2000);
-  assert.equal(retryDelayMs({ retryIntervalMs: 1500 }, new Date("2026-10-23T12:04:59+08:00")), 2000);
+  assert.equal(retryDelayMs({ retryIntervalMs: 1500 }, new Date("2026-10-23T12:00:00+08:00")), 300);
+  assert.equal(retryDelayMs({ retryIntervalMs: 1500 }, new Date("2026-10-23T12:04:59+08:00")), 300);
+  const retryNow = new Date("2026-10-23T12:00:01+08:00");
+  assert.equal(retryDelayMs({}, retryNow, new RetryableBookingError("网站返回：已被预定"), 0), 300);
+  assert.equal(retryDelayMs({}, retryNow, new RetryableBookingError("请求频繁"), 0), 5000);
+  assert.equal(retryDelayMs({}, retryNow, new GridNotReadyError("数据未就绪"), 1), 1000);
+  assert.equal(retryDelayMs({}, retryNow, new GridNotReadyError("数据未就绪"), 3), 3000);
   const scheduledConfig = { targetDateMode: "auto", targetDate: "2026-10-29", releaseAt: "auto" };
-  assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:59:50+08:00")), null);
+  assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:29:50+08:00")), null);
   assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:00:00+08:00")), null);
-  assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:04:59+08:00")), null);
-  assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:05:00+08:00")), /截止/);
+  assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:02:59+08:00")), null);
+  assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:03:00+08:00")), /截止/);
   assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T15:09:41+08:00")), /截止/);
-  assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:59:49+08:00")), /尚未/);
+  assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:29:49+08:00")), /尚未/);
   assert.match(scheduledSkipReason({ ...scheduledConfig, targetDate: "2026-10-28" }, new Date("2026-10-21T12:00:00+08:00")), /周三/);
   assert.equal(scheduledSkipReason({ ...scheduledConfig, targetDate: "2026-11-01" }, new Date("2026-10-25T12:00:00+08:00")), null);
   const weeklyConfig = { activityType: "健身房", sundayBooking: { activityType: "羽毛球" } };

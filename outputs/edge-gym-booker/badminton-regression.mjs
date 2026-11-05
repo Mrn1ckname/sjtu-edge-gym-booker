@@ -48,7 +48,10 @@ try {
   await page.goto(config.bookingUrl);
   const started = Date.now();
   assert.equal((await attemptBooking(page, config))[0].courtName, '场地10');
-  assert.ok(Date.now()-started >= 3000, 'must await delayed list, target response and DOM painting');
+  const selectionMs = Date.now() - started;
+  assert.ok(selectionMs >= 3000, 'must await delayed list, target response and DOM painting');
+  assert.ok(selectionMs < 20000, '模拟延迟网络下应在20秒内完成选场');
+  console.log(`模拟接口及DOM延迟下首次选场耗时：${selectionMs}ms`);
   assert.equal((await attemptBooking(page, config))[0].courtName, '场地9');
   assert.equal(documents, 1, 'normal retry must not reload the document');
   assert.equal(targetRequests, 2, 'each retry must fetch fresh target-date data');

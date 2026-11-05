@@ -46,16 +46,16 @@ export function gridTracker(page, record = () => {}) {
       }
     })();
   });
-  async function idle(timeoutMs = 30000) {
+  async function idle(timeoutMs = 12000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (!pending.size && Date.now() - changed >= 500) return;
+      if (!pending.size && Date.now() - changed >= 150) return;
       await sleep(100);
     }
     record('grid-idle-timeout', { pending: [...pending.values()].map(({ id, date, kind }) => ({ id, date, kind })) });
     throw new GridNotReadyError('场地或日期列表接口尚未完成，保留当前页面等待下一轮');
   }
-  async function ready(config, after = 0, timeoutMs = 30000) {
+  async function ready(config, after = 0, timeoutMs = 12000) {
     const deadline = Date.now() + timeoutMs;
     let previous = '', stableSince = Date.now();
     while (Date.now() < deadline) {
@@ -87,7 +87,7 @@ export function gridTracker(page, record = () => {}) {
       const signature = JSON.stringify({ responseId: response?.id, state });
       if (!valid || signature !== previous) stableSince = Date.now();
       previous = signature;
-      if (valid && Date.now() - stableSince >= 800) {
+      if (valid && Date.now() - stableSince >= 300) {
         record('grid-ready', { responseId: response.id, date: response.date, activity: config.activityType,
           stableMs: Date.now() - stableSince, targetSlots: config.timeSlots.map(slot => {
             const row = Number(slot.slice(0, 2)) - 7;
