@@ -161,6 +161,7 @@ function fail(message) {
 
 function applyWeekdayBooking(config, now = new Date()) {
   const weekday = new Date(now.getTime() + 8 * 60 * 60 * 1000).getUTCDay();
+  if (weekday === 4 && config.thursdayBooking) return { ...config, ...config.thursdayBooking };
   // 沿用已有 sundayBooking 字段，周六与周日共享羽毛球配置。
   return [0, 6].includes(weekday) && config.sundayBooking ? { ...config, ...config.sundayBooking } : config;
 }
