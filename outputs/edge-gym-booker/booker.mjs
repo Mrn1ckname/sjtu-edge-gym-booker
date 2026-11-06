@@ -118,7 +118,7 @@ function scheduledSkipReason(config, now = new Date()) {
     return "定时运行要求 targetDate 和 releaseAt 均为 auto";
   }
   const release = new Date(resolveReleaseAt(config)).getTime();
-  if (now.getTime() < release - (30 * 60_000 + 10_000)) return "尚未到 11:29:50 的定时启动窗口";
+  if (now.getTime() < release - 15_000) return "尚未到 11:59:45 的定时启动窗口";
   if (now.getTime() >= release + 3 * 60_000) return "已超过 12:03 的预约截止时间，跳过本次预约";
   return null;
 }
@@ -134,7 +134,7 @@ function isRetryableBeforeSubmission(error) {
   return error instanceof RetryableBookingError ||
     error instanceof GridNotReadyError ||
     error.name === "TimeoutError" ||
-    /net::ERR_(?:CONNECTION|INTERNET|NETWORK|NAME_NOT_RESOLVED|TIMED_OUT)/.test(error.message);
+    /net::ERR_(?:ABORTED|CONNECTION|INTERNET|NETWORK|NAME_NOT_RESOLVED|TIMED_OUT)/.test(error.message);
 }
 
 function isAfterChinaNoon(now = new Date()) {
@@ -382,6 +382,7 @@ async function recoverAuthentication(page, config, { saveState = saveAuthenticat
         document.body?.innerText.includes("我的订单") &&
         !document.body?.innerText.includes("校内人员登录")), null, { timeout: 15_000 });
       if (await requiresHumanLogin(page)) throw new AuthenticationExpiredError("登录页面要求密码或人工验证");
+      await waitForLoginReturn(page);
       authenticationGuards.get(context)?.beforeNavigation();
       await reloadBookingDocument(page, config, 'after-campus-login');
     }
@@ -398,9 +399,9 @@ async function recoverAuthentication(page, config, { saveState = saveAuthenticat
     diagnostics?.record('auth-recovery-error', { message: error.message });
     const failures = (authenticationRecoveryFailures.get(context) || 0) + 1;
     authenticationRecoveryFailures.set(context, failures);
-    if (!(await requiresHumanLogin(page)) && failures < 3 &&
+    if (!(await requiresHumanLogin(page)) &&
         (isRetryableBeforeSubmission(error) || error instanceof AuthenticationExpiredError)) {
-      throw new RetryableBookingError(`登录恢复尚未完成（连续失败 ${failures}/3），将刷新后继续尝试：${error.message}`);
+      throw new RetryableBookingError(`登录恢复尚未完成（连续失败 ${failures} 次），将刷新后继续尝试：${error.message}`);
     }
     throw new AuthenticationExpiredError(
       `无法自动恢复登录：需要人工验证或已连续失败 ${failures} 次。请运行 npm run login 完成登录。原因：${error.message}`
@@ -428,9 +429,19 @@ async function reloadBookingDocument(page, config, reason) {
   diagnostics?.record('document-reload-complete', { reason });
 }
 
+async function waitForLoginReturn(page) {
+  if (!/^https:\/\/sports\.sjtu\.edu\.cn(?:\/|$)/.test(page.url()) && page.url() !== 'about:blank') {
+    if (await requiresHumanLogin(page)) throw new AuthenticationExpiredError('登录页面要求人工验证');
+    diagnostics?.record('auth-redirect-wait', {});
+    await page.waitForURL(url => url.origin === 'https://sports.sjtu.edu.cn', { timeout: 15000, waitUntil: 'domcontentloaded' });
+  }
+  await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+}
+
 async function openAuthenticatedBookingPage(page, config, options) {
   gridTracker(page, (event, data) => diagnostics?.record(event, data));
   try {
+    await waitForLoginReturn(page);
     authenticationGuards.get(page.context())?.beforeNavigation();
     if (page.url() === config.bookingUrl) {
       await page.reload({ waitUntil: "domcontentloaded" });
@@ -933,12 +944,9 @@ async function capture(page, label) {
   return file;
 }
 
-async function holdOpen(context, minutes, cutoff = null) {
-  const configuredMs = Math.max(1, Number(minutes) || 60) * 60_000;
-  const ms = cutoff === null ? configuredMs : Math.max(0, Math.min(configuredMs, cutoff - Date.now()));
-  log(cutoff === null
-    ? `Edge 将保持打开 ${Math.round(ms / 60_000)} 分钟；检查完成后也可直接关闭窗口或按 Ctrl+C。`
-    : `Edge 最迟保留至12:03（剩余 ${Math.ceil(ms / 1000)} 秒）；需要支付请在关闭前完成。`);
+async function holdOpen(context, minutes) {
+  const ms = Math.max(1, Number(minutes) || 60) * 60_000;
+  log(`Edge 将保持打开 ${Math.round(ms / 60_000)} 分钟；检查完成后也可直接关闭窗口或按 Ctrl+C。`);
   await new Promise((resolve) => setTimeout(resolve, ms));
   await context.close();
 }
@@ -970,16 +978,6 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
   context.setDefaultNavigationTimeout(15_000);
   context.setDefaultTimeout(10_000);
   let page = await getPage(context);
-  let deadlineTimer = null;
-  if (scheduled) {
-    const cutoff = new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000;
-    deadlineTimer = setTimeout(() => {
-      log('到达12:03，关闭预约专用浏览器并结束本次脚本。');
-      diagnostics.record('run-cutoff', { reason: 'absolute-deadline' });
-      setTimeout(() => process.exit(0), 1500).unref();
-      void context.close().finally(() => process.exit(0));
-    }, Math.max(0, cutoff - Date.now()));
-  }
   let closing = false;
   process.on("SIGINT", async () => {
     if (closing) return;
@@ -1081,12 +1079,12 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
     process.stdout.write("\u0007\u0007\u0007");
     const screenshot = await capture(result.page || page, result.outcome);
     log(`页面截图：${screenshot}`);
-    await holdOpen(context, config.keepOpenMinutes, scheduled ? new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000 : null);
+    await holdOpen(context, config.keepOpenMinutes);
   } catch (error) {
     if (error instanceof ScheduledWindowClosedError) {
       log(`停止尝试：${error.message}。提交记录见本次日志。`);
       diagnostics.record('run-cutoff', { message: error.message });
-      await holdOpen(context, config.keepOpenMinutes, scheduled ? new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000 : null);
+      await holdOpen(context, config.keepOpenMinutes);
       return;
     }
     process.stdout.write("\u0007\u0007\u0007");
@@ -1094,11 +1092,9 @@ async function bookingMode({ scheduled = false, configOverrides = {} } = {}) {
     console.error(`\n错误：${error.message}`);
     console.error(`页面截图：${screenshot}`);
     diagnostics.record('run-error', { message: error.message, stack: error.stack });
-    console.error(scheduled ? "Edge 最迟保留至12:03。" : `Edge 会保留 ${config.keepOpenMinutes} 分钟，便于你查看页面提示。`);
-    await holdOpen(context, config.keepOpenMinutes, scheduled ? new Date(resolveReleaseAt(config)).getTime() + 3 * 60_000 : null);
+    console.error(`Edge 会保留 ${config.keepOpenMinutes} 分钟，便于你查看页面提示。`);
+    await holdOpen(context, config.keepOpenMinutes);
     process.exitCode = 1;
-  } finally {
-    if (deadlineTimer) clearTimeout(deadlineTimer);
   }
 }
 
@@ -1148,6 +1144,7 @@ function selfTest() {
   assert.equal(isAfterChinaNoon(new Date("2026-10-25T12:00:00+08:00")), true);
   assert.equal(isLoadingFailure(new RetryableBookingError("认证检查尚未完成，场馆接口仍在响应中")), true);
   assert.equal(isLoadingFailure(new RetryableBookingError("时段 17:00-18:00 暂无可选场地")), false);
+  assert.equal(isRetryableBeforeSubmission(new Error("page.goto: net::ERR_ABORTED")), true);
   assert.equal(isLoadingFailure(new AuthenticationExpiredError("请重新登录")), false);
   assert.equal(retryDelayMs({ retryIntervalMs: 1500 }, new Date("2026-10-23T11:59:59+08:00")), 1500);
   assert.equal(retryDelayMs({ retryIntervalMs: 1500 }, new Date("2026-10-23T12:00:00+08:00")), 300);
@@ -1158,19 +1155,19 @@ function selfTest() {
   assert.equal(retryDelayMs({}, retryNow, new GridNotReadyError("数据未就绪"), 1), 1000);
   assert.equal(retryDelayMs({}, retryNow, new GridNotReadyError("数据未就绪"), 3), 3000);
   const scheduledConfig = { targetDateMode: "auto", targetDate: "2026-10-29", releaseAt: "auto" };
-  assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:29:50+08:00")), null);
+  assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:59:45+08:00")), null);
   assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:00:00+08:00")), null);
   assert.equal(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:02:59+08:00")), null);
   assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T12:03:00+08:00")), /截止/);
   assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T15:09:41+08:00")), /截止/);
-  assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:29:49+08:00")), /尚未/);
+  assert.match(scheduledSkipReason(scheduledConfig, new Date("2026-10-22T11:59:44+08:00")), /尚未/);
   assert.match(scheduledSkipReason({ ...scheduledConfig, targetDate: "2026-10-28" }, new Date("2026-10-21T12:00:00+08:00")), /周三/);
   assert.equal(scheduledSkipReason({ ...scheduledConfig, targetDate: "2026-11-01" }, new Date("2026-10-25T12:00:00+08:00")), null);
   const weeklyConfig = { activityType: "健身房", sundayBooking: { activityType: "羽毛球" } };
-  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-10-25T11:59:50+08:00")).activityType, "羽毛球");
-  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-11-07T11:59:50+08:00")).activityType, "羽毛球");
-  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-11-06T11:59:50+08:00")).activityType, "健身房");
-  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-10-26T11:59:50+08:00")).activityType, "健身房");
+  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-10-25T11:59:45+08:00")).activityType, "羽毛球");
+  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-11-07T11:59:45+08:00")).activityType, "羽毛球");
+  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-11-06T11:59:45+08:00")).activityType, "健身房");
+  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-10-26T11:59:45+08:00")).activityType, "健身房");
   assert.equal(isRetryableBeforeSubmission(Object.assign(new Error("loading"), { name: "TimeoutError" })), true);
   assert.equal(isRetryableBeforeSubmission(new RetryableBookingError("场馆数据未就绪")), true);
   assert.equal(isRetryableBeforeSubmission(new Error("登录已失效")), false);
