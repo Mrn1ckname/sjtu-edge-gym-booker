@@ -123,6 +123,43 @@ powershell -ExecutionPolicy Bypass -File .\install-schedule.ps1
 - 修改了项目位置或 Node.js 安装路径：在新位置重新运行安装定时任务的命令。
 - 查看配置字段说明和完整流程：[详细使用文档](outputs/edge-gym-booker/README.md)。
 
+## 修改场馆、时段和每周计划
+
+使用 `notepad config.json` 修改配置并保存，再运行 `npm.cmd run check`。定时任务每次启动会重新读取配置，无须重新安装依赖。
+
+| 配置项 | 填写方法 |
+| --- | --- |
+| `bookingUrl` / `activityType` | 普通日期使用的场馆详情链接和项目名，示例为学生中心、健身房 |
+| `timeSlots` | 例如 `["17:00-18:00"]`；填写网站上的完整时段 |
+| `preferredCourts` | 例如 `["场地10", "场地9"]`，按顺序尝试，均无名额时再选其他可用场地 |
+| `excludedCourts` | 不希望选择的场地名称关键词；默认 `[]` |
+| `sundayBooking` | 只在周日覆盖基础配置，可独立填写场馆、项目、优先场地和时段 |
+| `thursdayBooking` | 可选，只在周四覆盖基础配置，例如 `{ "timeSlots": ["16:00-17:00"] }`；示例文件未启用 |
+| `keepOpenMinutes` | 完成或报错后保留预约浏览器的时间，默认60分钟 |
+
+周三跳过是程序和任务安装脚本的默认设置；周六使用基础健身房配置。周日覆盖按**脚本执行当天**判断；自动预约日期为执行日的七天后。手动测试若恰逢周日，也会应用周日覆盖，请同时检查该项。
+
+## 更新已有安装
+
+使用Git下载的用户，在仓库根目录执行：
+
+```powershell
+git pull --ff-only origin main
+cd .\outputs\edge-gym-booker
+npm.cmd ci
+npm.cmd test
+npm.cmd run check
+powershell -ExecutionPolicy Bypass -File .\install-schedule.ps1
+```
+
+重新安装同名定时任务会更新启动时间，不会立即抢场。保留原有 `config.json`、`.auth-state.json` 和 `.edge-profile`，不要重新复制示例配置。使用ZIP下载的用户先关闭正在运行的预约脚本，再将新版源码解压到原目录，保留这些个人文件，并执行上述安装依赖、检查和安装任务命令。
+
+## 如何确认预约结果
+
+打开 `logs` 中最新的 `*-run.log`，查找“已到达支付界面并停止”；随后由本人支付。选中绿色格子、点击下单或仅打开订单详情都不能单独作为成功依据。`*-run.jsonl` 记录接口耗时、认证恢复、目标日期、选场及提交结果，排查失败时可与文字日志对照。`sinceReleaseMs` 表示提交时距计划开抢时间的毫秒数。
+
+遇到网络变化或导航中断，程序会重试；正在登录回跳时先等待返回场馆网站。出现密码、滑块等人工验证要求时，请在页面完成。11:59:45启动只提供15秒准备时间，登录过期或网站响应较慢时可能错过最早名额。
+
 ## 默认计划
 
 - 除周三外，每天 11:59:45 启动，12:00 开抢，12:03停止预约，随后保留Edge界面60分钟；预约七天后的 17:00–18:00。
