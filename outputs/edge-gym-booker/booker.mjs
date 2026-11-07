@@ -165,8 +165,8 @@ function fail(message) {
 function applyWeekdayBooking(config, now = new Date()) {
   const weekday = new Date(now.getTime() + 8 * 60 * 60 * 1000).getUTCDay();
   if (weekday === 4 && config.thursdayBooking) return { ...config, ...config.thursdayBooking };
-  // 沿用已有 sundayBooking 字段，周六与周日共享羽毛球配置。
-  return [0, 6].includes(weekday) && config.sundayBooking ? { ...config, ...config.sundayBooking } : config;
+  // 仅周日应用羽毛球覆盖；周六使用学生中心健身房基础配置。
+  return weekday === 0 && config.sundayBooking ? { ...config, ...config.sundayBooking } : config;
 }
 
 function readConfig() {
@@ -1165,7 +1165,7 @@ function selfTest() {
   assert.equal(scheduledSkipReason({ ...scheduledConfig, targetDate: "2026-11-01" }, new Date("2026-10-25T12:00:00+08:00")), null);
   const weeklyConfig = { activityType: "健身房", sundayBooking: { activityType: "羽毛球" } };
   assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-10-25T11:59:45+08:00")).activityType, "羽毛球");
-  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-11-07T11:59:45+08:00")).activityType, "羽毛球");
+  assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-11-07T11:59:45+08:00")).activityType, "健身房");
   assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-11-06T11:59:45+08:00")).activityType, "健身房");
   assert.equal(applyWeekdayBooking(weeklyConfig, new Date("2026-10-26T11:59:45+08:00")).activityType, "健身房");
   assert.equal(isRetryableBeforeSubmission(Object.assign(new Error("loading"), { name: "TimeoutError" })), true);

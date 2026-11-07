@@ -27,7 +27,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $principal `
-    -Description "SJTU booking except Wednesday 11:59:45; Saturday/Sunday air-dome badminton, otherwise Student Center gym; seven days ahead 17:00-18:00" `
+    -Description "SJTU booking except Wednesday 11:59:45; Sunday air-dome badminton, otherwise Student Center gym; seven days ahead 17:00-18:00" `
     -Force | Out-Null
 
 $cleanupAction = New-ScheduledTaskAction -Execute $nodePath -Argument ('"' + (Join-Path $root "log-retention.mjs") + '"') -WorkingDirectory $root
@@ -37,5 +37,5 @@ Register-ScheduledTask -TaskName "SJTU-Gym-Booker-LogCleanup" -Action $cleanupAc
 
 Write-Host "Scheduled task created: $taskName"
 Write-Host "Starts: 11:59:45 every day except Wednesday; booking starts at 12:00"
-Write-Host "Target: Saturday/Sunday air-dome badminton; otherwise Student Center gym; seven days ahead, 17:00-18:00"
+Write-Host "Target: Sunday air-dome badminton; otherwise Student Center gym; seven days ahead, 17:00-18:00"
 Write-Host "Keep Windows signed in and online, and allow wake timers."
